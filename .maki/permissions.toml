@@ -1,0 +1,29 @@
+[bash]
+allow = [
+    "ls *",
+    "touch *",
+    "mkdir *",
+    "mv *",
+    "true *",
+    "rm *",
+    "pip *",
+    "pytest *",
+    "find *",
+    "head *",
+    "sort *",
+    "for *",
+    "wc *",
+    "grep *",
+    "curl *",
+    "python3 *",
+    "echo *",
+    "file *",
+    "tail *",
+    "python *",
+    "git *",
+]
+
+[webfetch]
+allow = [
+    "*",
+]

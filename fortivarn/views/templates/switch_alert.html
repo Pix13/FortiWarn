@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body { font-family: sans-serif; }
+        .alert { color: #d9534f; font-weight: bold; }
+        .details { margin-top: 20px; padding: 10px; background: #f8f9fa; border: 1px solid #ddd; }
+    </style>
+</head>
+<body>
+    <h2 class="alert">SDWAN Connection Switch Detected</h2>
+    <p>Hello,</p>
+    <p>This is an automated alert from FortiWarn. The internet connection for your SDWAN pair has switched to the backup interface.</p>
+    
+    <div class="details">
+        <strong>Details:</strong><br>
+        Detected at: {{ timestamp }}<br>
+        Main Interface: {{ main_interface }}<br>
+        Backup Interface: {{ backup_interface }}
+    </div>
+
+    <p>Please check your Fortinet HA pair status.</p>
+</body>
+</html>
