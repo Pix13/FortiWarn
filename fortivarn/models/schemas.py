@@ -13,5 +13,12 @@ class FortinetResponse(BaseModel):
 
 class SDWANStatus(BaseModel):
     name: str
-    status: str  # e.g., "active", "backup"
+    status: str  # e.g., "up", "down", "pending" — FortiGate SDWAN member health status
+    interface: str  # The physical/vlink interface used by this member
+
+class InterfaceSDWANMember(BaseModel):
+    """Represents an SDWAN vlink member from the API."""
+    name: str
+    seq_num: int
     interface: str
+    zone: Optional[str] = None

@@ -19,13 +19,27 @@ Perform these steps on **both HA peers** so the daemon can query either unit wit
 
 ### 1.1 Interface Names
 
-Identify your WAN interfaces on the FortiGate:
+Identify your SDWAN WAN members on the FortiGate:
 
 ```bash
-exec sys interface | grep wan
+get system sdwan
 ```
 
-Use the names found above (e.g., `wan1`, `wan2`) in your `.env`.
+From the output, note the interface names listed under `members:`. For a FortiGate 101F, you might see something like:
+
+```
+members:
+    == [ 2 ]
+    seq-num:     2       interface: x2            zone: virtual-wan-link        
+    == [ 3 ]
+    seq-num:     3       interface: x1            zone: virtual-wan-link        
+```
+
+Use the `interface:` values (`x2`, `x1` in this example) in your `.env`:
+- **MAIN_INTERFACE** = the first (higher-seq-num or primary) member, e.g., `x2`
+- **BACKUP_INTERFACE** = the second member, e.g., `x1`
+
+> Note: On newer FortiOS versions with vlink interfaces, the interface name may differ. Always confirm from the actual output above.
 
 ### 1.2 API Key Authentication (Recommended)
 
@@ -70,8 +84,8 @@ Create or edit `.env` at the project root:
 | `FORTINET_USERNAME` | Conditionally | `admin` | Required if not using API key auth |
 | `FORTINET_PASSWORD` | Conditionally | `"mysecurepassword"` | Required if not using API key auth |
 | `FORTINET_API_KEY` | Conditionally | `"aBcD-eFgH-..."` | Recommended over username/password |
-| `MAIN_INTERFACE` | Yes | `wan1` | Primary WAN interface name |
-| `BACKUP_INTERFACE` | Yes | `wan2` | Backup WAN interface name |
+| `MAIN_INTERFACE` | Yes | `x2` | Primary SDWAN WAN member name (from `get system sdwan`) |
+| `BACKUP_INTERFACE` | Yes | `x1` | Backup SDWAN WAN member name (from `get system sdwan`) |
 | `SMTP_SERVER` | Yes | `smtp.gmail.com` | SMTP hostname |
 | `SMTP_PORT` | Yes | `587` | Port (587 for STARTTLS, 465 for SSL) |
 | `SMTP_USER` | Yes | `alerts@example.com` | SMTP sender username |
@@ -84,9 +98,9 @@ Create or edit `.env` at the project root:
 
 1. The daemon logs into the FortiGate (`/api/v2/authentication`) and obtains a session token.
 2. Every interval, it queries:
-   - Interface status via `/api/v2/cmdb/system/interface/<name>`
-   - SDWAN health via `/api/v2/monitor/system/status`
-3. If the main interface is down **or** SDWAN reports the backup active, an email alert is sent (only once per switch event, thanks to state tracking).
+   - SDWAN member status via `/api/v2/monitor/system/sdwan/member` (for interface health checks)
+   - Same endpoint for backup member verification
+3. A switch is detected if the main member reports down **or** if the backup member reports up while main was previously active.
 4. When the connection returns to normal, internal state resets — no redundant email is sent.
 
 ## 4. Running as a Background Service

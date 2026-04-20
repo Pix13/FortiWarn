@@ -30,9 +30,9 @@ async def test_check_connection_switch_detects_backup_active():
     mock_client.get_interface_status = AsyncMock(return_value=[
         InterfaceStatus(name="wan1", status="up")
     ])
-    # SDWAN reports backup (wan2) is active
+    # SDWAN reports backup (wan2) member is healthy/up
     mock_client.get_sdwan_status = AsyncMock(return_value=[
-        SDWANStatus(name="sdwan1", status="active", interface="wan2")
+        SDWANStatus(name="sdwan1", status="up", interface="wan2")
     ])
     
     service = SDWANMonitorService(client=mock_client, main_iface="wan1", backup_iface="wan2")
@@ -41,7 +41,7 @@ async def test_check_connection_switch_detects_backup_active():
     result = await service.check_connection_switch()
 
     # Assert
-    assert result is True  # Should detect switch because backup interface is active in SDWAN
+    assert result is True  # Should detect switch because backup interface reports up
 
 @pytest.mark.asyncio
 async def test_check_connection_switch_stable_on_main():
@@ -50,9 +50,7 @@ async def test_check_connection_switch_stable_on_main():
     mock_client.get_interface_status = AsyncMock(return_value=[
         InterfaceStatus(name="wan1", status="up")
     ])
-    mock_client.get_sdwan_status = AsyncMock(return_value=[
-        # No backup interface active in SDWAN list
-    ])
+    mock_client.get_sdwan_status = AsyncMock(return_value=[])
     
     service = SDWANMonitorService(client=mock_client, main_iface="wan1", backup_iface="wan2")
 
@@ -60,4 +58,4 @@ async def test_check_connection_switch_stable_on_main():
     result = await service.check_connection_switch()
 
     # Assert
-    assert result is False  # Should be stable
+    assert result is False  # Should be stable (main up, no backup reported)

@@ -86,29 +86,44 @@ class FortinetClient:
 
     async def get_interface_status(self, interface_name: str) -> List[InterfaceStatus]:
         """
-        Queries the FortiGate CMDB for the status of a specific interface.
-        Uses /api/v2/cmdb/system/interface/<interface_name> endpoint.
+        Queries the FortiGate SDWAN member list to determine if a specific
+        WAN member (physical/vlink interface) is up or down.
+
+        Uses /api/v2/monitor/system/sdwan/member endpoint which returns all
+        SDWAN vlink members and their health-check status.
         """
-        url = f"{self.base_url}/api/v2/cmdb/system/interface/{interface_name}"
+        url = f"{self.base_url}/api/v2/monitor/system/sdwan/member"
         try:
             data = await self._request("GET", url)
-            return FortinetResponse(**data).results
+            # Parse member list to find the requested interface
+            member_statuses = []
+            for item in data.get("results", []):
+                member_iface = item.get("interface", "")
+                if member_iface == interface_name or item.get("name") == interface_name:
+                    health = item.get("status", "unknown")
+                    # FortiGate SDWAN health checks return status like:
+                    # "up" (healthy), "down" (unhealthy)
+                    member_statuses.append(InterfaceStatus(
+                        name=item.get("interface", item.get("name", "")),
+                        status="up" if health in ("up",) else "down",
+                    ))
+            return member_statuses
         except Exception as e:
-            logger.error(f"Failed to get interface status for {interface_name}: {e}")
+            logger.error(f"Failed to get interface/membership status for {interface_name}: {e}")
             raise
 
     async def get_sdwan_status(self) -> List[SDWANStatus]:
         """
-        Queries the FortiGate API for SDWAN health/status.
-        Uses /api/v2/monitor/system/status endpoint.
+        Queries the FortiGate SDWAN members' health status.
+        Uses /api/v2/monitor/system/sdwan member endpoint.
         """
-        url = f"{self.base_url}/api/v2/monitor/system/status"
+        url = f"{self.base_url}/api/v2/monitor/system/sdwan/member"
         try:
             data = await self._request("GET", url)
             response_data = FortinetResponse(**data)
             if response_data.results:
                 return response_data.results
-            # Fallback: parse SDWAN status from results
+            # Fallback: parse SDWAN member status from results
             sdwan_statuses = []
             for item in data.get("results", []):
                 try:
@@ -118,10 +133,10 @@ class FortinetClient:
                         interface=item.get("interface", ""),
                     ))
                 except Exception as exc:
-                    logger.warning(f"Failed to parse SDWAN status item: {item} (error: {exc})")
+                    logger.warning(f"Failed to parse SDWAN member item: {item} (error: {exc})")
             return sdwan_statuses
         except Exception as e:
-            logger.error(f"Failed to get SDWAN status: {e}")
+            logger.error(f"Failed to get SDWAN member status: {e}")
             raise
 
 
