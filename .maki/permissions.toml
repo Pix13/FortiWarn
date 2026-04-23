@@ -21,6 +21,8 @@ allow = [
     "tail *",
     "python *",
     "git *",
+    "host *",
+    "cat *",
 ]
 
 [webfetch]

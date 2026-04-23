@@ -1,10 +1,19 @@
-from typing import Protocol, List
-from fortivarn.models.fortinet_client import FortinetClient
-from fortivarn.models.schemas import InterfaceStatus, SDWANStatus
+from typing import List, Protocol
+
+from fortivarn.models.schemas import HealthCheckResult
+
 
 class FortinetClientProtocol(Protocol):
-    async def get_interface_status(self, interface_name: str) -> List[InterfaceStatus]: ...
-    async def get_sdwan_status(self) -> List[SDWANStatus]: ...
+    async def get_health_checks(self) -> List[HealthCheckResult]: ...
+
+
+def _is_up(checks: List[HealthCheckResult], iface_name: str) -> bool:
+    """Return True if *iface_name* has at least one health-check entry with status ``up``."""
+    for c in checks:
+        if c.name == iface_name and c.status == "up":
+            return True
+    return False
+
 
 class SDWANMonitorService:
     def __init__(self, client: FortinetClientProtocol, main_iface: str, backup_iface: str):
@@ -13,29 +22,22 @@ class SDWANMonitorService:
         self.backup_iface = backup_iface
 
     async def check_connection_switch(self) -> bool:
+        """Return True when the SD-WAN connection has switched to (or is using) the backup.
+
+        A single API call fetches health checks for *all* interfaces at once, then we filter
+        locally — no redundant round-trips to the FortiGate.
+
+        Detection logic: a switch is confirmed only when **both** of these conditions hold:
+
+            1. The main interface reports ``down`` (health-check failed).
+            2. The backup interface explicitly exists in the results and reports ``up``.
+
+        This avoids false positives during transient states where both links may briefly show
+        "down" or where only one probe is temporarily flapping while the other remains healthy.
         """
-        Returns True if the connection has switched to the backup interface.
-        Logic: If main SDWAN member is down (no health-check success) OR
-              SDWAN reports a different member is active as the preferred path.
+        checks = await self.client.get_health_checks()
 
-        For FortiGate vlink-based SDWAN topologies, we check:
-        1. Interface status of each SDWAN member via health checks
-        2. SDWAN member list to see which members report "up"
-           If backup is reported as up while main isn't clearly down,
-           that indicates a routing/policy shift — treat it as a switch.
-        """
-        # 1. Check if the main interface (SDWAN member) is up
-        interfaces = await self.client.get_interface_status(self.main_iface)
-        main_is_up = any(i.name == self.main_iface and i.status == "up" for i in interfaces)
+        main_up = _is_up(checks, self.main_iface)
+        backup_up = _is_up(checks, self.backup_iface)
 
-        # 2. Check SDWAN member status
-        sdwan_statuses = await self.client.get_sdwan_status()
-
-        # A switch has occurred if:
-        # - Main member is down (interface health check failed), OR
-        # - Backup member reports up (indicating it's the active path)
-        backup_is_up = any(
-            s.interface == self.backup_iface and s.status == "up" for s in sdwan_statuses
-        )
-
-        return not main_is_up or backup_is_up
+        return not main_up and backup_up

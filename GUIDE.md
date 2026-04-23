@@ -41,36 +41,43 @@ Use the `interface:` values (`x2`, `x1` in this example) in your `.env`:
 
 > Note: On newer FortiOS versions with vlink interfaces, the interface name may differ. Always confirm from the actual output above.
 
-### 1.2 API Key Authentication (Recommended)
+### 1.2 API Token Authentication (Recommended)
 
-Generate a permanent API key for an admin user:
+Generate a long-lived access token for an admin user via CLI or GUI:
 
-1. Go to **System > Administrators**, select your admin profile, and check **Enable API Key**.
-2. The GUI generates a key like: `aBcD-eFgH-iJkL-mNop`.
+```bash
+execute api-user generate-key <username> [expiry-in-minutes]
+```
 
-> Store this value in the `.env` variable `FORTINET_API_KEY`.
+The FortiGate prints the one-time key, e.g.: `fccys3cfbhyhqbqghkyzm1QGNnm31r`
+
+This token is passed as ``Authorization: Bearer <token>`` in every API request. No login step or session refresh is needed — tokens are valid until revoked or expired on the device side.
 
 ### 1.3 Username / Password Authentication (Fallback)
 
-If not using an API key, set `FORTINET_USERNAME` and `FORTINET_PASSWORD` instead of `FORTINET_API_KEY`. The admin account must have **super_admin** or equivalent policy-based permissions.
+If not using an API token, set `FORTINET_USERNAME` and `FORTINET_PASSWORD`. The daemon obtains a short-lived session key via ``POST /api/v2/authentication`` and automatically re-authenticates when it expires (default TTL ~25 minutes).
 
 ### 1.4 VDOM Considerations
 
-If your FortiGate runs in multi-VDOM mode, the current code does not yet pass a `vdom` parameter to API calls — this is tracked as a medium-priority improvement. Ensure the admin user has access to all VDOMs or configure the relevant settings when that fix lands.
+Add `FORTINET_VDOM` to your `.env` if the FortiGate runs in multi-VDOM mode:
+
+```ini
+FORTINET_VDOM=root   # or another named vdom
+```
+
+The daemon passes ``?vdom=<name>`` on every API call. Without this, calls may fail with 403 or return data from an unexpected VDOM in HA/multi-VDOM setups.
 
 ### 1.5 Firewall Rules
 
 Ensure your server running FortiWarn can reach the FortiGate:
 
 ```bash
-curl -k https://<FORTINET_HOST>/api/v2/authentication \
-     -X POST \
-     -H 'Content-Type: application/json' \
-     -d '{"secretkey": "<API_KEY>", "request_key": true}' \
-     2>&1 | python -m json.tool
+curl -k https://<FORTINET_HOST>/api/v2/monitor/virtual-wan/health-check \
+      -H 'Authorization: Bearer <API_TOKEN>' \
+      2>&1 | python -m json.tool
 ```
 
-The response should contain a `session_key`. If not, check that:
+The response should contain a JSON object with per-interface health data. If not, check that:
 - The FortiGate allows HTTPS API access from your server's IP.
 - The admin profile permits CLI/API access.
 
@@ -96,12 +103,18 @@ Create or edit `.env` at the project root:
 
 ## 3. How It Works
 
-1. The daemon logs into the FortiGate (`/api/v2/authentication`) and obtains a session token.
-2. Every interval, it queries:
-   - SDWAN member status via `/api/v2/monitor/system/sdwan/member` (for interface health checks)
-   - Same endpoint for backup member verification
-3. A switch is detected if the main member reports down **or** if the backup member reports up while main was previously active.
-4. When the connection returns to normal, internal state resets — no redundant email is sent.
+1. If using an **API token**, the daemon verifies it once at startup and then includes ``Authorization: Bearer <token>`` on every request (no session to refresh).
+2. If using **username/password**, the daemon calls ``POST /api/v2/authentication`` with credentials and obtains a short-lived session key, which is automatically re-obtained when expired (~25 min TTL).
+3. Every interval it queries:
+
+   ```
+   GET /api/v2/monitor/virtual-wan/health-check?vdom=root
+   ```
+
+   This single call returns the health status of all SD-WAN member interfaces (latency, jitter, packet_loss) in one round-trip — no redundant API calls.
+
+4. A switch is confirmed only when **both** conditions hold: main interface reports ``down`` AND backup explicitly exists and reports ``up``. This avoids false positives during transient failures where both links may briefly flap simultaneously.
+5. When the connection returns to normal, internal state resets — no redundant email is sent.
 
 ## 4. Running as a Background Service
 
