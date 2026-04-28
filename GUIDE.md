@@ -139,7 +139,256 @@ EOF
 sudo systemctl enable --now fortivarn
 ```
 
-## 5. Testing
+## 5. Email Warning System
+
+When the daemon detects that the SDWAN connection has switched from the **main** to the **backup** interface, it renders the HTML template at `fortivarn/views/templates/switch_alert.html` and sends it via SMTP. State is tracked in memory so you receive **one** email per failover, not one per polling interval.
+
+### 5.1 Choose an SMTP relay
+
+Any RFC-compliant SMTP server works. Pick the row that matches your environment:
+
+| Provider | `SMTP_SERVER` | `SMTP_PORT` | Auth notes |
+|---|---|---|---|
+| Gmail / Google Workspace | `smtp.gmail.com` | `587` | Requires an **App Password** (account → Security → 2-Step Verification → App passwords). Regular password will not work. |
+| Microsoft 365 | `smtp.office365.com` | `587` | Requires SMTP AUTH enabled on the mailbox + an App Password if MFA is on. |
+| Amazon SES | `email-smtp.<region>.amazonaws.com` | `587` | Use the SMTP credentials generated in the SES console (not your AWS IAM key). |
+| SendGrid | `smtp.sendgrid.net` | `587` | `SMTP_USER=apikey`, `SMTP_PASSWORD=<your API key>`. |
+| Internal Postfix relay | `mail.corp.local` | `25` or `587` | Auth optional — see § 5.4 for unauthenticated relays. |
+
+Port semantics used by FortiWarn:
+
+- **587** → STARTTLS is performed automatically.
+- **465** → STARTTLS is performed automatically. (Note: 465 is technically implicit-TLS; the current implementation uses STARTTLS for both 587 and 465. Use 587 if your provider supports it.)
+- **Any other port** → plain SMTP, no encryption upgrade. Only use this on a trusted internal relay.
+
+### 5.2 Configure `.env`
+
+Add the SMTP block to your `.env`:
+
+```ini
+# --- Email alerting ---
+SMTP_SERVER=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=alerts@example.com
+SMTP_PASSWORD="abcd efgh ijkl mnop"   # quote app passwords that contain spaces
+EMAIL_FROM=fortiwarn@example.com      # must match SMTP_USER for most providers
+EMAIL_TO=ops@example.com              # single recipient
+```
+
+Notes:
+- `EMAIL_FROM` must match (or be authorised by) `SMTP_USER`. Gmail/M365 will silently rewrite or reject mismatched From addresses.
+- `EMAIL_TO` currently accepts a single address. To fan out, point it at a distribution list on your mail server.
+- Restart the daemon after editing `.env` — settings are loaded once at startup.
+
+### 5.3 Test the email path end-to-end
+
+The cleanest way to verify SMTP without waiting for a real failover is to call the email service directly from a Python REPL:
+
+```bash
+cd /home/<user>/fortiwarn
+source venv/bin/activate
+export PYTHONPATH=.
+python - <<'PY'
+import asyncio
+from fortivarn.config.settings import FortiWarnSettings
+from fortivarn.views.email_service import EmailService
+
+async def main():
+    s = FortiWarnSettings()
+    await EmailService(s).send_switch_alert(s.main_interface, s.backup_interface)
+    print("Sent.")
+
+asyncio.run(main())
+PY
+```
+
+You should receive an email titled **"ALERT: SDWAN Connection Switched to Backup"** within a few seconds. If not, check:
+
+| Symptom | Likely cause |
+|---|---|
+| `SMTPAuthenticationError` | Wrong password, or app password not generated, or 2FA blocking basic auth. |
+| `SMTPSenderRefused` | `EMAIL_FROM` does not match the authenticated mailbox. |
+| `SMTPServerDisconnected` | Wrong port (e.g. 465 used as plain SMTP) or firewall blocking egress 587/465/25. |
+| `SMTPRecipientsRefused` | Relay refuses to send to the recipient (open-relay rules). |
+| Mail accepted but never arrives | Greylisting, SPF/DKIM/DMARC failure on `EMAIL_FROM`, spam filter. Check the relay's logs. |
+
+### 5.4 Unauthenticated internal relay
+
+If your `SMTP_USER` is empty in `.env`, the daemon skips `server.login()` entirely. Useful for an internal Postfix that accepts mail from trusted source IPs:
+
+```ini
+SMTP_SERVER=mail.corp.local
+SMTP_PORT=25
+SMTP_USER=
+SMTP_PASSWORD=
+EMAIL_FROM=fortiwarn@corp.local
+EMAIL_TO=noc@corp.local
+```
+
+(Pydantic still requires `SMTP_PASSWORD` to be present in the file — leave it as an empty string.)
+
+### 5.5 Customising the alert template
+
+The HTML body lives at `fortivarn/views/templates/switch_alert.html` and receives three Jinja2 variables:
+
+| Variable | Type | Example |
+|---|---|---|
+| `timestamp` | `str` | `2026-04-28 14:32:01` |
+| `main_interface` | `str` | `x2` |
+| `backup_interface` | `str` | `x1` |
+
+Edit the template in place — no code changes needed. The daemon reloads it on every send.
+
+## 6. Zabbix Integration
+
+A one-shot status probe is provided for Zabbix agent ``UserParameter`` polling. It performs a single FortiOS health-check API call and prints one integer to stdout:
+
+| Value | Meaning |
+|---|---|
+| `0` | Main interface is up (normal) |
+| `1` | Backup interface is active (failover) |
+| `2` | Unknown / both interfaces down / API error |
+
+Exit code is always `0` so the Zabbix item records the value rather than going "unsupported".
+
+### 6.1 Manual test
+
+Run the probe by hand on the host that has FortiWarn installed:
+
+```bash
+cd /home/<user>/fortiwarn
+./venv/bin/python -m fortivarn.controllers.zabbix_check
+# → 0   (main is up)
+```
+
+### 6.2 Zabbix agent — installation
+
+If the agent is not yet installed on the FortiWarn host:
+
+```bash
+# Debian/Ubuntu
+sudo apt install zabbix-agent2          # or zabbix-agent (classic)
+
+# RHEL/Fedora
+sudo dnf install zabbix-agent2
+```
+
+The classic agent reads `/etc/zabbix/zabbix_agentd.conf` + `/etc/zabbix/zabbix_agentd.d/*.conf`. Agent 2 reads `/etc/zabbix/zabbix_agent2.conf` + `/etc/zabbix/zabbix_agent2.d/*.conf`. The `UserParameter` syntax is identical.
+
+### 6.3 Zabbix agent — base configuration
+
+Edit the main agent config so it can reach your Zabbix server:
+
+```ini
+# /etc/zabbix/zabbix_agentd.conf  (or zabbix_agent2.conf)
+Server=<zabbix-server-ip>             # passive checks: who may poll us
+ServerActive=<zabbix-server-ip>       # active checks: where we push to
+Hostname=fortiwarn-host               # MUST match the "Host name" field in the Zabbix UI
+Include=/etc/zabbix/zabbix_agentd.d/*.conf
+LogFile=/var/log/zabbix/zabbix_agentd.log
+Timeout=10                            # raise from default 3s — FortiGate API call may exceed it
+```
+
+> **Important**: `Timeout` must be ≥ a few seconds because the probe makes a live HTTPS call to the FortiGate. The default 3 s is too short and will produce intermittent `ZBX_NOTSUPPORTED: Timeout while executing a shell script.`
+
+### 6.4 Zabbix agent — UserParameter
+
+Drop the FortiWarn UserParameter into its own file so package upgrades don't overwrite it:
+
+```bash
+sudo tee /etc/zabbix/zabbix_agentd.d/fortiwarn.conf >/dev/null <<'EOF'
+# FortiWarn — SDWAN failover status probe
+# 0 = main up, 1 = backup active, 2 = unknown/error
+UserParameter=fortiwarn.sdwan.status,cd /home/<user>/fortiwarn && ./venv/bin/python -m fortivarn.controllers.zabbix_check 2>/dev/null
+EOF
+sudo systemctl restart zabbix-agent     # or zabbix-agent2
+```
+
+Permissions notes:
+- The Zabbix agent runs as user `zabbix` by default. That user must be able to **read** `/home/<user>/fortiwarn/.env` and **execute** the venv Python.
+- Quick fix: `sudo setfacl -R -m u:zabbix:rX /home/<user>/fortiwarn`
+- Or move the project to `/opt/fortiwarn` and `chown -R zabbix:zabbix /opt/fortiwarn`.
+
+### 6.5 Verify from the Zabbix server
+
+From the Zabbix server (or any host with `zabbix_get` installed):
+
+```bash
+zabbix_get -s <agent-host-ip> -k fortiwarn.sdwan.status
+# Expected output: 0  (or 1 / 2)
+```
+
+If you see `ZBX_NOTSUPPORTED`:
+
+| Message | Cause |
+|---|---|
+| `Unsupported item key.` | UserParameter not loaded — restart the agent, check the include path. |
+| `Timeout while executing a shell script.` | Raise `Timeout=` in `zabbix_agentd.conf` (see § 6.3). |
+| `Permission denied` | The `zabbix` user cannot read `.env` or execute the venv. |
+| Output is `2` always | The probe itself errors — run it manually as the `zabbix` user (`sudo -u zabbix ...`) to see the real exception. |
+
+### 6.6 Zabbix server — host configuration
+
+In the Zabbix frontend (**Configuration → Hosts**):
+
+1. **Create host** (or open the existing one for the FortiWarn machine):
+   - **Host name**: must match `Hostname=` from § 6.3.
+   - **Interfaces**: add an *Agent* interface pointing to the FortiWarn host's IP, port `10050`.
+   - **Templates**: optional — link `Linux by Zabbix agent` for base OS metrics.
+   - **Host groups**: e.g. `Network/SDWAN`.
+
+2. **Add the value mapping** (**Administration → General → Value mapping**, or **Data collection → Value mappings** in 6.4+):
+   - Name: `FortiWarn SDWAN status`
+   - Mappings:
+     - `0` → `Main`
+     - `1` → `Backup`
+     - `2` → `Unknown`
+
+3. **Add the item** (host → Items → Create item):
+   - **Name**: `SDWAN active link`
+   - **Type**: `Zabbix agent`
+   - **Key**: `fortiwarn.sdwan.status`
+   - **Type of information**: `Numeric (unsigned)`
+   - **Update interval**: `1m`
+   - **History storage period**: `7d` (or per your retention policy)
+   - **Trends storage period**: `90d`
+   - **Show value**: `FortiWarn SDWAN status` (the value mapping above)
+   - **Applications / Tags**: `component: sdwan`
+
+4. **Add triggers** (host → Triggers → Create trigger). Syntax shown for Zabbix 5.4+ (new expression syntax):
+
+   - **Failover to backup** (warning):
+     - Name: `SDWAN failed over to backup link on {HOST.NAME}`
+     - Severity: `Warning`
+     - Expression: `last(/fortiwarn-host/fortiwarn.sdwan.status)=1`
+     - Recovery expression: `last(/fortiwarn-host/fortiwarn.sdwan.status)=0`
+
+   - **Status unknown** (high):
+     - Name: `SDWAN status unknown on {HOST.NAME}`
+     - Severity: `High`
+     - Expression: `last(/fortiwarn-host/fortiwarn.sdwan.status)=2`
+     - Generate problem: `Multiple` with a 5-minute condition to avoid flapping: `min(/fortiwarn-host/fortiwarn.sdwan.status,5m)=2`
+
+   For Zabbix ≤ 5.0 (legacy `{host:key.func()}` syntax):
+   ```
+   {fortiwarn-host:fortiwarn.sdwan.status.last()}=1
+   {fortiwarn-host:fortiwarn.sdwan.status.min(5m)}=2
+   ```
+
+5. **(Optional) Action / notification** (**Configuration → Actions → Trigger actions**):
+   - Conditions: `Trigger severity ≥ Warning` AND `Host group = Network/SDWAN`.
+   - Operations: send message via your media type (email, Slack, etc.) to the on-call user group.
+   - This is independent from the FortiWarn email — Zabbix gives you escalation, acknowledgements, and a dashboard view; FortiWarn's own email is the immediate first signal.
+
+### 6.7 Dashboard widget (optional)
+
+Add a *Plain text* or *Item value* widget on your NOC dashboard:
+
+- Item: `fortiwarn-host: SDWAN active link`
+- Show value mapping: ✓
+- Result: the dashboard reads **Main** / **Backup** / **Unknown** in real time.
+
+## 7. Testing
 
 ```bash
 source venv/bin/activate

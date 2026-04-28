@@ -1,6 +1,6 @@
 import smtplib
 from email.message import EmailMessage
-from jinja2 import Environment, FileSystemLoader, select_folder_path
+from jinja2 import Environment, FileSystemLoader
 from datetime import datetime
 from typing import Any, Dict
 from fortivarn.config.settings import FortiWarnSettings

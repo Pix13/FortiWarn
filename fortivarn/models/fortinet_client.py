@@ -76,8 +76,7 @@ class FortinetClient:
         if not self._check_success(resp_data):
             raise RuntimeError(f"FortiGate login rejected: {resp_data}")
 
-        key = str(resp_data.get("session_key"))
-        await asyncio.sleep(self._SESSION_TTL_SECONDS)  # noqa: RUF017 — placeholder; see note below.
+        self._session_key = str(resp_data.get("session_key"))
         logger.info("Authenticated with FortiGate via username/password.")
 
     async def _verify_token(self, token: str) -> None:
