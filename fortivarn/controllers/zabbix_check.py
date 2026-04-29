@@ -4,9 +4,10 @@ Invoked by a Zabbix agent ``UserParameter`` to report which SDWAN link is
 currently carrying traffic on the FortiGate. Performs a single health-check
 API call and prints one integer to stdout:
 
-    0  main interface is up (normal state)
-    1  backup interface is active (main is down, backup is up)
-    2  unknown / error / both interfaces down
+    0  HEALTHY              — main up, backup up (full redundancy)
+    1  ON_BACKUP            — main down, backup up (failover active)
+    2  UNKNOWN              — probe failed / both interfaces down
+    3  DEGRADED_BACKUP_DOWN — main up, backup down (no failover capacity)
 
 Exit code is always 0 so Zabbix records the value rather than treating the
 poll as a failed item.
@@ -17,11 +18,19 @@ import sys
 
 from fortivarn.config.settings import FortiWarnSettings
 from fortivarn.models.fortinet_client import FortinetClient
-from fortivarn.services.sdwan_service import SDWANMonitorService, _is_up
+from fortivarn.services.sdwan_service import LinkState, SDWANMonitorService
 
 STATUS_MAIN = 0
 STATUS_BACKUP = 1
 STATUS_UNKNOWN = 2
+STATUS_DEGRADED = 3
+
+_STATE_TO_STATUS = {
+    LinkState.HEALTHY: STATUS_MAIN,
+    LinkState.ON_BACKUP: STATUS_BACKUP,
+    LinkState.BOTH_DOWN: STATUS_UNKNOWN,
+    LinkState.DEGRADED_BACKUP_DOWN: STATUS_DEGRADED,
+}
 
 
 async def _probe() -> int:
@@ -33,15 +42,8 @@ async def _probe() -> int:
         backup_iface=settings.backup_interface,
     )
     async with client:
-        checks = await client.get_health_checks()
-        main_up = _is_up(checks, service.main_iface)
-        backup_up = _is_up(checks, service.backup_iface)
-
-    if main_up:
-        return STATUS_MAIN
-    if backup_up:
-        return STATUS_BACKUP
-    return STATUS_UNKNOWN
+        state = await service.get_link_state()
+    return _STATE_TO_STATUS.get(state, STATUS_UNKNOWN)
 
 
 def main() -> None:

@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body { font-family: sans-serif; }
+        .warn { color: #f0ad4e; font-weight: bold; }
+        .details { margin-top: 20px; padding: 10px; background: #fff8e1; border: 1px solid #f0ad4e; }
+    </style>
+</head>
+<body>
+    <h2 class="warn">SDWAN Backup Link Down — Redundancy Lost</h2>
+    <p>Hello,</p>
+    <p>This is an automated alert from FortiWarn. The <strong>main</strong> internet link is still UP and carrying traffic, but the <strong>backup</strong> link is currently DOWN. Your SDWAN pair has lost its failover capability — if the main link fails now, there will be no automatic switchover.</p>
+
+    <div class="details">
+        <strong>Details:</strong><br>
+        Detected at: {{ timestamp }}<br>
+        Main Interface: {{ main_interface }} (UP)<br>
+        Backup Interface: {{ backup_interface }} (DOWN)
+    </div>
+
+    <p>Please investigate the backup link (cabling, ISP, FortiGate interface state) as soon as possible.</p>
+</body>
+</html>

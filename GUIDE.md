@@ -141,7 +141,16 @@ sudo systemctl enable --now fortivarn
 
 ## 5. Email Warning System
 
-When the daemon detects that the SDWAN connection has switched from the **main** to the **backup** interface, it renders the HTML template at `fortivarn/views/templates/switch_alert.html` and sends it via SMTP. State is tracked in memory so you receive **one** email per failover, not one per polling interval.
+FortiWarn sends **two distinct email alerts**, each fired exactly once per state transition (rising edge). State is tracked in memory so you do not receive a fresh email on every polling interval while a problem persists.
+
+| Alert | Subject | Trigger condition | Template |
+|---|---|---|---|
+| **Failover** | `ALERT: SDWAN Connection Switched to Backup` | Main interface DOWN **and** backup UP | `switch_alert.html` |
+| **Redundancy lost** | `WARNING: SDWAN Backup Link Down — Redundancy Lost` | Main UP **and** backup DOWN | `backup_down_alert.html` |
+
+Both emails reset their internal "already sent" flag the moment the condition clears, so a flapping link will produce one email per real transition — not a stream.
+
+Why two alerts? When the backup is dead but the main is still serving traffic, users see no impact, but you have silently lost your failover capability. Catching that early prevents a small problem (one ISP down) from becoming a hard outage (both ISPs down with no redundancy left).
 
 ### 5.1 Choose an SMTP relay
 
@@ -182,12 +191,14 @@ Notes:
 
 ### 5.3 Test the email path end-to-end
 
-The cleanest way to verify SMTP without waiting for a real failover is to call the email service directly from a Python REPL:
+The cleanest way to verify SMTP without waiting for a real failover is to call the email service directly from a Python REPL. Run **both** snippets so you confirm both alert paths work:
 
 ```bash
 cd /home/<user>/fortiwarn
 source venv/bin/activate
 export PYTHONPATH=.
+
+# 1. Test the failover alert
 python - <<'PY'
 import asyncio
 from fortivarn.config.settings import FortiWarnSettings
@@ -196,13 +207,27 @@ from fortivarn.views.email_service import EmailService
 async def main():
     s = FortiWarnSettings()
     await EmailService(s).send_switch_alert(s.main_interface, s.backup_interface)
-    print("Sent.")
+    print("Failover alert sent.")
+
+asyncio.run(main())
+PY
+
+# 2. Test the "backup down — redundancy lost" alert
+python - <<'PY'
+import asyncio
+from fortivarn.config.settings import FortiWarnSettings
+from fortivarn.views.email_service import EmailService
+
+async def main():
+    s = FortiWarnSettings()
+    await EmailService(s).send_backup_down_alert(s.main_interface, s.backup_interface)
+    print("Redundancy-lost alert sent.")
 
 asyncio.run(main())
 PY
 ```
 
-You should receive an email titled **"ALERT: SDWAN Connection Switched to Backup"** within a few seconds. If not, check:
+You should receive both emails within a few seconds. If not, check:
 
 | Symptom | Likely cause |
 |---|---|
@@ -227,29 +252,39 @@ EMAIL_TO=noc@corp.local
 
 (Pydantic still requires `SMTP_PASSWORD` to be present in the file — leave it as an empty string.)
 
-### 5.5 Customising the alert template
+### 5.5 Customising the alert templates
 
-The HTML body lives at `fortivarn/views/templates/switch_alert.html` and receives three Jinja2 variables:
+Both HTML bodies live under `fortivarn/views/templates/`:
+
+| Template | Purpose |
+|---|---|
+| `switch_alert.html` | Failover detected — traffic now on backup. |
+| `backup_down_alert.html` | Backup is down while main still up — redundancy lost. |
+
+Each template receives the same three Jinja2 variables:
 
 | Variable | Type | Example |
 |---|---|---|
-| `timestamp` | `str` | `2026-04-28 14:32:01` |
+| `timestamp` | `str` | `2026-04-29 14:32:01` |
 | `main_interface` | `str` | `x2` |
 | `backup_interface` | `str` | `x1` |
 
-Edit the template in place — no code changes needed. The daemon reloads it on every send.
+Edit the templates in place — no code changes needed. The daemon reloads them on every send.
 
 ## 6. Zabbix Integration
 
 A one-shot status probe is provided for Zabbix agent ``UserParameter`` polling. It performs a single FortiOS health-check API call and prints one integer to stdout:
 
-| Value | Meaning |
-|---|---|
-| `0` | Main interface is up (normal) |
-| `1` | Backup interface is active (failover) |
-| `2` | Unknown / both interfaces down / API error |
+| Value | Symbolic name | Meaning |
+|---|---|---|
+| `0` | `HEALTHY` | Main up, backup up — full redundancy. |
+| `1` | `ON_BACKUP` | Main DOWN, backup up — failover active. |
+| `2` | `UNKNOWN` | Both down, or probe failed (API/network/auth error). |
+| `3` | `DEGRADED` | Main up, backup DOWN — no failover capacity. |
 
 Exit code is always `0` so the Zabbix item records the value rather than going "unsupported".
+
+> The numeric ordering is intentional: `0` is OK, `1` is the most operationally severe (you're already on backup), `2` is unknown, and `3` was added later for the degraded state to preserve compatibility with anyone whose triggers pre-date that feature.
 
 ### 6.1 Manual test
 
@@ -340,9 +375,10 @@ In the Zabbix frontend (**Configuration → Hosts**):
 2. **Add the value mapping** (**Administration → General → Value mapping**, or **Data collection → Value mappings** in 6.4+):
    - Name: `FortiWarn SDWAN status`
    - Mappings:
-     - `0` → `Main`
-     - `1` → `Backup`
-     - `2` → `Unknown`
+     - `0` → `Healthy (main + backup up)`
+     - `1` → `On backup (failover)`
+     - `2` → `Unknown / both down`
+     - `3` → `Degraded (backup down)`
 
 3. **Add the item** (host → Items → Create item):
    - **Name**: `SDWAN active link`
@@ -357,13 +393,19 @@ In the Zabbix frontend (**Configuration → Hosts**):
 
 4. **Add triggers** (host → Triggers → Create trigger). Syntax shown for Zabbix 5.4+ (new expression syntax):
 
-   - **Failover to backup** (warning):
+   - **Failover to backup** (high — operationally severe):
      - Name: `SDWAN failed over to backup link on {HOST.NAME}`
-     - Severity: `Warning`
+     - Severity: `High`
      - Expression: `last(/fortiwarn-host/fortiwarn.sdwan.status)=1`
      - Recovery expression: `last(/fortiwarn-host/fortiwarn.sdwan.status)=0`
 
-   - **Status unknown** (high):
+   - **Backup link down — redundancy lost** (warning):
+     - Name: `SDWAN backup link DOWN on {HOST.NAME} (no failover capacity)`
+     - Severity: `Warning`
+     - Expression: `last(/fortiwarn-host/fortiwarn.sdwan.status)=3`
+     - Recovery expression: `last(/fortiwarn-host/fortiwarn.sdwan.status)=0`
+
+   - **Status unknown** (high — likely both ISPs down or probe broken):
      - Name: `SDWAN status unknown on {HOST.NAME}`
      - Severity: `High`
      - Expression: `last(/fortiwarn-host/fortiwarn.sdwan.status)=2`
@@ -371,8 +413,9 @@ In the Zabbix frontend (**Configuration → Hosts**):
 
    For Zabbix ≤ 5.0 (legacy `{host:key.func()}` syntax):
    ```
-   {fortiwarn-host:fortiwarn.sdwan.status.last()}=1
-   {fortiwarn-host:fortiwarn.sdwan.status.min(5m)}=2
+   {fortiwarn-host:fortiwarn.sdwan.status.last()}=1   # on backup
+   {fortiwarn-host:fortiwarn.sdwan.status.last()}=3   # backup down (degraded)
+   {fortiwarn-host:fortiwarn.sdwan.status.min(5m)}=2  # unknown / both down
    ```
 
 5. **(Optional) Action / notification** (**Configuration → Actions → Trigger actions**):

@@ -49,6 +49,16 @@ async def test_probe_returns_backup_when_main_down_backup_up():
 
 
 @pytest.mark.asyncio
+async def test_probe_returns_degraded_when_main_up_backup_down():
+    s_patch, c_patch = _patched_probe([
+        HealthCheckResult(name="wan1", status="up"),
+        HealthCheckResult(name="wan2", status="down"),
+    ])
+    with s_patch, c_patch:
+        assert await zabbix_check._probe() == zabbix_check.STATUS_DEGRADED
+
+
+@pytest.mark.asyncio
 async def test_probe_returns_unknown_when_both_down():
     s_patch, c_patch = _patched_probe([
         HealthCheckResult(name="wan1", status="down"),
