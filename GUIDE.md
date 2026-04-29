@@ -87,19 +87,22 @@ Create or edit `.env` at the project root:
 
 | Variable | Required | Example | Notes |
 |---|---|---|---|
-| `FORTINET_HOST` | Yes | `192.168.10.1` | IP or hostname of the FortiGate HA pair |
-| `FORTINET_USERNAME` | Conditionally | `admin` | Required if not using API key auth |
-| `FORTINET_PASSWORD` | Conditionally | `"mysecurepassword"` | Required if not using API key auth |
-| `FORTINET_API_KEY` | Conditionally | `"aBcD-eFgH-..."` | Recommended over username/password |
+| `FORTINET_HOST` | Yes | `192.168.10.1` or `fw.corp.local:8443` | Hostname/IP, optional `:port`. A full URL (`https://host/`) is also accepted; the scheme/trailing slash is stripped automatically. |
+| `FORTINET_API_KEY` | Conditionally | `aBcD-eFgH-...` | **Either** this **or** `FORTINET_USERNAME`+`FORTINET_PASSWORD` must be set. API key recommended. |
+| `FORTINET_USERNAME` | Conditionally | `admin` | Required only if `FORTINET_API_KEY` is empty. |
+| `FORTINET_PASSWORD` | Conditionally | `"mysecurepassword"` | Required only if `FORTINET_API_KEY` is empty. |
+| `FORTINET_VDOM` | No | `root` | Set on multi-VDOM FortiGates; passed as `?vdom=<name>` on every API call. |
 | `MAIN_INTERFACE` | Yes | `x2` | Primary SDWAN WAN member name (from `get system sdwan`) |
 | `BACKUP_INTERFACE` | Yes | `x1` | Backup SDWAN WAN member name (from `get system sdwan`) |
 | `SMTP_SERVER` | Yes | `smtp.gmail.com` | SMTP hostname |
-| `SMTP_PORT` | Yes | `587` | Port (587 for STARTTLS, 465 for SSL) |
-| `SMTP_USER` | Yes | `alerts@example.com` | SMTP sender username |
-| `SMTP_PASSWORD` | Yes | `app-password` | SMTP password |
-| `EMAIL_FROM` | Yes | `fortivarn@example.com` | Sender address |
-| `EMAIL_TO` | Yes | `ops@example.com` | Alert recipient |
+| `SMTP_PORT` | Yes | `587` | 587 / 465 trigger STARTTLS automatically; any other port = plain SMTP. |
+| `SMTP_USER` | No | `alerts@example.com` | Leave empty for unauthenticated internal relays. If set, `SMTP_PASSWORD` must also be set. |
+| `SMTP_PASSWORD` | No | `app-password` | Required only if `SMTP_USER` is set. |
+| `EMAIL_FROM` | Yes | `fortiwarn@example.com` | Sender address (must match the authenticated mailbox on most providers). |
+| `EMAIL_TO` | Yes | `ops@example.com` | Single recipient. Use a distribution list to fan out. |
 | `CHECK_INTERVAL_SECONDS` | No | `60` | Default 60 seconds between checks |
+
+**Authentication rule:** the daemon refuses to start unless one of the two FortiGate auth modes is fully configured. `FORTINET_USERNAME` without `FORTINET_PASSWORD` (or vice-versa) is treated as missing and falls back to requiring an API key.
 
 ## 3. How It Works
 

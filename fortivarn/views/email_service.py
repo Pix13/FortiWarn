@@ -51,7 +51,7 @@ class EmailService:
                 if self.settings.smtp_port in (587, 465):
                     server.starttls()
 
-                if self.settings.smtp_user:
+                if self.settings.smtp_user and self.settings.smtp_password:
                     server.login(
                         self.settings.smtp_user,
                         self.settings.smtp_password.get_secret_value(),
